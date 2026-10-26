@@ -1,0 +1,7 @@
+# Extra defaults for the esp-emulator (M5EMU) build
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_TASK_WDT_EN=n
+CONFIG_ESP_INT_WDT=n
+# esp-emulator does not implement the ESP32-S3 PIE/SIMD (ee.*) instructions used by esp-dsp
+CONFIG_DSP_ANSI=y
+# CONFIG_DSP_OPTIMIZED is not set

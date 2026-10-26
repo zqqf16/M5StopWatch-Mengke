@@ -1,0 +1,81 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# MacOS desktop metadata files
+.DS_Store
+
+# Build files
+build/
+cmake-build-*/
+Debug/
+debug/
+Release/
+release/
+out/
+bin/
+obj/
+
+# Fetched third-party components (repos.json / fetch_repos.py).
+# Keep ignoring fetched /components/ except the in-tree emulator shim.
+/components/*
+!components/m5emu/
+!components/m5emu/**
+
+managed_components/
+
+# Asset-regen cache and official character source renders (intentionally omitted)
+tools/cache/
+research/img/
+
+# Logs and local test output
+*.log
+screenshots/
+qemu_test_results/
+removed_official_apps/
+
+# PlatformIO
+.pio/
+
+# VSCode
+.vscode/
+.cache/
+
+# Python virtual environment
+.venv/
+
+*.code-workspace
+
+# Generated local config. Keep sdkconfig.defaults, sdkconfig.emu,
+# and sdkconfig.m5stack-stopwatch tracked.
+sdkconfig
+sdkconfig.old
