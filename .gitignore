@@ -57,9 +57,11 @@ managed_components/
 tools/cache/
 research/img/
 
-# Logs and local test output
+# Logs and local test output.
+# qemu_test.py writes throwaway frames to /screenshots/.
+# README images live in docs/screenshots/ and stay tracked.
 *.log
-screenshots/
+/screenshots/
 qemu_test_results/
 removed_official_apps/
 
