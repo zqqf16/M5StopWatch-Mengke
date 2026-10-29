@@ -134,19 +134,58 @@ public:
 
     void play(std::vector<int16_t>& data, bool async)
     {
+        if (GetHAL().isDisplayAsleep()) {
+            return;
+        }
+        if (!async) {
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                if (_is_playing) {
+                    mclog::tagWarn(_tag, "audio is playing");
+                    return;
+                }
+                if (data.empty()) {
+                    return;
+                }
+                _is_playing = true;
+            }
+            GetHAL().setSpeakerAmpEnabled(true);
+            _write(data);
+            GetHAL().setSpeakerAmpEnabled(false);
+            std::lock_guard<std::mutex> lock(_mutex);
+            _is_playing = false;
+            return;
+        }
+
         std::lock_guard<std::mutex> lock(_mutex);
-        if (async) {
+        if (data.empty()) {
+            _audio_data.clear();
+            _abort      = true;
+            _is_playing = false;
+        } else {
             // Support interruption: overwrite data and notify task
+            _abort      = false;
             _audio_data = data;
             _is_playing = true;
-            xTaskNotifyGive(_task_handle);
-        } else {
-            if (_is_playing) {
-                mclog::tagWarn(_tag, "audio is playing");
-                return;
-            }
-            _write(data);
         }
+        xTaskNotifyGive(_task_handle);
+    }
+
+    void abort()
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _audio_data.clear();
+        _abort      = true;
+        _is_playing = false;
+        if (_task_handle) {
+            xTaskNotifyGive(_task_handle);
+        }
+    }
+
+    bool isActive()
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _is_playing;
     }
 
     void record(std::vector<int16_t>& data, uint16_t durationMs, float gain)
@@ -204,34 +243,52 @@ private:
             // Wait for play request
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+            bool amp_on = false;
             while (true) {
-                // Fetch data safely
+                bool aborting = false;
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
-                    if (_audio_data.empty()) {
+                    aborting = _abort || GetHAL().isDisplayAsleep();
+                    if (aborting) {
+                        _abort = false;
+                        _audio_data.clear();
                         _is_playing = false;
-                        break;
+                        current_data.clear();
+                    } else if (_audio_data.empty()) {
+                        _is_playing = false;
+                        current_data.clear();
+                    } else {
+                        current_data = std::move(_audio_data);
+                        _audio_data.clear();
+                        _is_playing = true;
                     }
-                    current_data = _audio_data;
-                    _audio_data.clear();
-                    _is_playing = true;
                 }
 
-                if (current_data.empty()) {
+                if (aborting || current_data.empty()) {
                     break;
+                }
+
+                if (!amp_on) {
+                    GetHAL().setSpeakerAmpEnabled(true);
+                    amp_on = true;
                 }
 
                 size_t offset        = 0;
                 size_t total_samples = current_data.size();
                 bool interrupted     = false;
+                bool stop_now        = false;
                 // Chunk size in samples (e.g. 1024 bytes = 512 samples)
                 const size_t CHUNK_SAMPLES = 512;
 
                 while (offset < total_samples) {
-                    // Check for interruption (new play request)
+                    // Check for interruption (new play request or idle abort)
                     if (ulTaskNotifyTake(pdTRUE, 0) > 0) {
-                        mclog::tagInfo(_tag, "playback interrupted by new clip");
+                        mclog::tagInfo(_tag, "playback interrupted");
                         interrupted = true;
+                        break;
+                    }
+                    if (GetHAL().isDisplayAsleep()) {
+                        stop_now = true;
                         break;
                     }
 
@@ -242,8 +299,9 @@ private:
                     _emu_write(&current_data[offset], write_samples);
 #else
                     {
-                        int64_t t0 = esp_timer_get_time();
-                        int ret = esp_codec_dev_write(_codec_dev, (void*)&current_data[offset], write_samples * sizeof(int16_t));
+                        int64_t t0  = esp_timer_get_time();
+                        int ret     = esp_codec_dev_write(_codec_dev, (void*)&current_data[offset],
+                                                          write_samples * sizeof(int16_t));
                         // Mengke fw: trace the I2S path (QEMU has no audio output; this proves data is pushed to I2S)
                         if (offset == 0 || ((offset / CHUNK_SAMPLES) % 32) == 0) {
                             mclog::tagInfo(_tag, "i2s write chunk @{} / {} samples: {} bytes ret={} ({} us)", offset,
@@ -255,20 +313,60 @@ private:
                     offset += write_samples;
                 }
 
+                if (stop_now) {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    _abort = false;
+                    _audio_data.clear();
+                    _is_playing = false;
+                    current_data.clear();
+                    break;
+                }
+
                 if (interrupted) {
                     // Stop current playback immediately and flush DMA
                     if (_tx_handle) {
                         i2s_channel_disable(_tx_handle);
                         i2s_channel_enable(_tx_handle);
                     }
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    if (_abort || GetHAL().isDisplayAsleep()) {
+                        _abort = false;
+                        _audio_data.clear();
+                        _is_playing = false;
+                        current_data.clear();
+                        break;
+                    }
+                    current_data.clear();
                     continue;
                 }
 
-                mclog::tagInfo(_tag, "i2s: clip done, wrote {} bytes ({} samples @{}Hz) to ES8311", total_samples * sizeof(int16_t),
-                               total_samples, sample_rate);
+                mclog::tagInfo(_tag, "i2s: clip done, wrote {} bytes ({} samples @{}Hz) to ES8311",
+                               total_samples * sizeof(int16_t), total_samples, sample_rate);
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    if (!_audio_data.empty() && !_abort && !GetHAL().isDisplayAsleep()) {
+                        current_data.clear();
+                        continue;
+                    }
+                }
                 // Normal finish, play silence to avoid pop/waiting
-                if (_codec_dev) esp_codec_dev_write(_codec_dev, (void*)_silence_buffer.data(),
-                                    _silence_buffer.size() * sizeof(int16_t));
+                if (_codec_dev && !GetHAL().isDisplayAsleep()) {
+                    esp_codec_dev_write(_codec_dev, (void*)_silence_buffer.data(),
+                                        _silence_buffer.size() * sizeof(int16_t));
+                }
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    if (_audio_data.empty() || _abort || GetHAL().isDisplayAsleep()) {
+                        _abort      = false;
+                        _is_playing = false;
+                    }
+                }
+                current_data.clear();
+                break;
+            }
+
+            if (amp_on) {
+                GetHAL().setSpeakerAmpEnabled(false);
             }
         }
     }
@@ -519,6 +617,7 @@ private:
     float _spectrum_normalization_level                                            = 0.03f;
     bool _spectrum_available                                                       = false;
     bool _is_playing                                                               = false;
+    bool _abort                                                                    = false;
     int _emu_volume                                                                = 80;
 } _audio_codec;
 
@@ -528,10 +627,38 @@ void Hal::audio_init()
 
     _audio_codec.init(i2c_bus_get_internal_bus_handle(_i2c_bus));
 
-    ioe_speaker_enable(true);
+    // AW8737A idles at a few mA if left enabled. Turn it on only around playback.
+    setSpeakerAmpEnabled(false);
 
     // Load volume from settings
     setSpeakerVolume(getSpeakerVolume(true), false);
+}
+
+void Hal::setSpeakerAmpEnabled(bool enable)
+{
+    static std::mutex amp_mutex;
+    std::lock_guard<std::mutex> lock(amp_mutex);
+    // Recheck under the lock so a clip cannot turn the amp back on after
+    // display sleep has already forced it off.
+    if (enable && isDisplayAsleep()) {
+        enable = false;
+    }
+    if (_spk_amp_valid && _spk_amp_on == enable) {
+        return;
+    }
+    _spk_amp_valid = true;
+    _spk_amp_on    = enable;
+    ioe_speaker_enable(enable);
+}
+
+void Hal::audio_abort()
+{
+    _audio_codec.abort();
+}
+
+bool Hal::audio_is_active()
+{
+    return _audio_codec.isActive();
 }
 
 void Hal::setSpeakerVolume(int volume, bool saveToSettings)
@@ -570,6 +697,10 @@ void Hal::audioRecord(std::vector<int16_t>& data, uint16_t durationMs, float gai
 
 void Hal::audioPlay(std::vector<int16_t>& data, bool async)
 {
+    if (isDisplayAsleep()) {
+        mclog::tagInfo(_tag, "drop playback while display is asleep");
+        return;
+    }
     _audio_codec.play(data, async);
 }
 

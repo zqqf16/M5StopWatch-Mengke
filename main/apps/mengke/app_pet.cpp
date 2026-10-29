@@ -375,6 +375,7 @@ void AppMengkePet::onRunning()
         break;
     case State::Dance:
         if (shake || keyB || tap >= 0) {
+            if (shake) GetHAL().noteUserActivity();
             s->shakes++;
             mk::bounce(s->img, 1);
             mk::starBurst(_root, 233, 170, 6, 150);

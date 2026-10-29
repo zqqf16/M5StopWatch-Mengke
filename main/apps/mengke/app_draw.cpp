@@ -109,6 +109,7 @@ void AppMengkeDraw::onRunning()
         auto& d   = GetHAL().getImuData();
         float mag = sqrtf(d.accelX * d.accelX + d.accelY * d.accelY + d.accelZ * d.accelZ);
         if (fabsf(mag - 1.0f) > 0.9f || fabsf(mag - s->last_mag) > 0.8f) {
+            GetHAL().noteUserActivity();
             if (s->phase != State::Rolling) {
                 mclog::tagInfo("Draw", "shake detected |a|={:.2f}g", mag);
                 trigger = true;

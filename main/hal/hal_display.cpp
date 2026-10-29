@@ -11,6 +11,11 @@
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
 #include <memory>
+#include <driver/gpio.h>
+#include <esp_attr.h>
+#include <esp_err.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 static const std::string_view _tag = "HAL-Display";
 
@@ -25,6 +30,7 @@ static constexpr gpio_num_t cfg_pin_io3  = GPIO_NUM_45;
 static constexpr gpio_num_t cfg_pin_cs   = GPIO_NUM_39;
 static constexpr gpio_num_t cfg_pin_te   = GPIO_NUM_38;
 static constexpr gpio_num_t cfg_pin_rst  = GPIO_NUM_NC;
+static constexpr gpio_num_t cfg_pin_tp_int = GPIO_NUM_13;  // CST820B TP_INT, active low
 
 class Panel_CO5300 : public lgfx::Panel_AMOLED {
 public:
@@ -60,6 +66,33 @@ public:
                 return list0;
             default:
                 return nullptr;
+        }
+    }
+
+    // setBrightness() only writes 0x51. Sleep In is what stops the panel scan.
+    void setPanelSleep(bool sleep)
+    {
+        if (sleep) {
+            startWrite();
+            write_cmd(0x28);  // Display Off
+            _bus->wait();
+            cs_control(true);
+            write_cmd(0x10);  // Sleep In
+            _bus->wait();
+            cs_control(true);
+            endWrite();
+        } else {
+            startWrite();
+            write_cmd(0x11);  // Sleep Out
+            _bus->wait();
+            cs_control(true);
+            endWrite();
+            vTaskDelay(pdMS_TO_TICKS(120));
+            startWrite();
+            write_cmd(0x29);  // Display On
+            _bus->wait();
+            cs_control(true);
+            endWrite();
         }
     }
 };
@@ -156,6 +189,11 @@ public:
     {
         _panel_instance.setBrightness(brightness);
     }
+
+    void setPanelSleep(bool sleep)
+    {
+        _panel_instance.setPanelSleep(sleep);
+    }
 };
 
 #ifdef M5EMU_PORT
@@ -251,6 +289,17 @@ int Hal::getBackLightBrightness(bool loadFromSettings)
 
 static std::unique_ptr<Cst820> _cst820;
 
+static volatile bool _tp_int_flag = false;
+static bool _tp_int_ready         = false;
+static bool _tp_seen_high         = false;
+static uint32_t _tp_arm_ms        = 0;
+static uint32_t _tp_poll_ms       = 0;
+
+static void IRAM_ATTR touch_int_isr(void *)
+{
+    _tp_int_flag = true;
+}
+
 void Hal::touchpad_init()
 {
     mclog::tagInfo(_tag, "touchpad init");
@@ -265,6 +314,95 @@ void Hal::touchpad_init()
         mclog::tagError(_tag, "touchpad init failed");
         _cst820.reset();
     }
+
+    // TP_INT is active-low. Arm it only while the panel is asleep so a touch
+    // can wake the host without polling the controller at LVGL rates.
+    gpio_config_t io = {};
+    io.pin_bit_mask  = 1ULL << cfg_pin_tp_int;
+    io.mode          = GPIO_MODE_INPUT;
+    io.pull_up_en    = GPIO_PULLUP_ENABLE;
+    io.pull_down_en  = GPIO_PULLDOWN_DISABLE;
+    io.intr_type     = GPIO_INTR_NEGEDGE;
+    gpio_config(&io);
+
+    const esp_err_t isr_svc = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    if (isr_svc != ESP_OK && isr_svc != ESP_ERR_INVALID_STATE) {
+        mclog::tagWarn(_tag, "touch ISR service: {}", static_cast<int>(isr_svc));
+    }
+    if (gpio_isr_handler_add(cfg_pin_tp_int, touch_int_isr, nullptr) == ESP_OK) {
+        _tp_int_ready = true;
+        gpio_intr_disable(cfg_pin_tp_int);
+    }
+}
+
+void Hal::touchpad_sleep()
+{
+#ifdef M5EMU_PORT
+    return;
+#else
+    if (_tp_int_ready) {
+        gpio_intr_disable(cfg_pin_tp_int);
+    }
+    _tp_int_flag = false;
+    if (_cst820) {
+        _cst820->sleep();
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+    _tp_int_flag  = false;
+    _tp_seen_high = gpio_get_level(cfg_pin_tp_int) != 0;
+    // Ignore the sleep-command glitch. A finger after this still wakes.
+    _tp_arm_ms  = millis() + 300;
+    _tp_poll_ms = 0;
+    if (_tp_int_ready) {
+        gpio_intr_enable(cfg_pin_tp_int);
+    }
+#endif
+}
+
+void Hal::touchpad_wake()
+{
+#ifdef M5EMU_PORT
+    return;
+#else
+    if (_tp_int_ready) {
+        gpio_intr_disable(cfg_pin_tp_int);
+    }
+    _tp_int_flag = false;
+    // Deep sleep on the CST820 needs a reset before it reports again.
+    ioe_tp_reset();
+#endif
+}
+
+bool Hal::touchpad_wake_requested()
+{
+#ifdef M5EMU_PORT
+    m5emu::update();
+    return m5emu::touch.down;
+#else
+    const uint32_t now = millis();
+    if (static_cast<int32_t>(now - _tp_arm_ms) < 0) {
+        _tp_int_flag = false;
+        return false;
+    }
+
+    if (_tp_int_ready) {
+        if (gpio_get_level(cfg_pin_tp_int) != 0) {
+            _tp_seen_high = true;
+        }
+        // Require the line to have been high so a stuck-low INT cannot
+        // immediately wake and re-sleep.
+        if (_tp_seen_high && (_tp_int_flag || gpio_get_level(cfg_pin_tp_int) == 0)) {
+            return true;
+        }
+    }
+
+    // Slow poll in case Sleep was ignored or INT is not wired.
+    if (_tp_poll_ms != 0 && now - _tp_poll_ms < 250) {
+        return false;
+    }
+    _tp_poll_ms = now;
+    return getTouchPoint().num > 0;
+#endif
 }
 
 Hal::TouchPoint Hal::getTouchPoint()
@@ -272,15 +410,22 @@ Hal::TouchPoint Hal::getTouchPoint()
     Hal::TouchPoint point;
 #ifdef M5EMU_PORT
     m5emu::update();
-    if (m5emu::touch.down) { point.num = 1; point.x = m5emu::touch.x; point.y = m5emu::touch.y; }
-    return point;
-#endif
+    if (m5emu::touch.down) {
+        point.num = 1;
+        point.x   = m5emu::touch.x;
+        point.y   = m5emu::touch.y;
+    }
+#else
     if (_cst820 && _cst820->read()) {
         point.num = _cst820->getFingerNum();
         if (point.num > 0) {
             point.x = _cst820->getX();
             point.y = _cst820->getY();
         }
+    }
+#endif
+    if (point.num > 0) {
+        noteUserActivity();
     }
     return point;
 }
@@ -309,7 +454,13 @@ static void lvgl_rtos_task(void *pvParameter)
 {
     (void)pvParameter;
     while (1) {
-        if (_lvgl_update_enabled && pdTRUE == xSemaphoreTake(xGuiSemaphore, portMAX_DELAY)) {
+        // Display sleep stops refresh. A short poll is enough to notice wake
+        // without the 2 ms render loop keeping the CPU busy.
+        if (!_lvgl_update_enabled) {
+            vTaskDelay(pdMS_TO_TICKS(30));
+            continue;
+        }
+        if (pdTRUE == xSemaphoreTake(xGuiSemaphore, portMAX_DELAY)) {
             // Recheck after taking the mutex. stopLvglUpdate() may have been
             // called while this task was waiting for an in-flight UI update.
             if (_lvgl_update_enabled) {
@@ -440,4 +591,111 @@ void Hal::startLvglUpdate()
 void Hal::stopLvglUpdate()
 {
     _lvgl_update_enabled = false;
+}
+
+static void display_panel_sleep(bool sleep)
+{
+    if (!_display) {
+        return;
+    }
+#ifndef M5EMU_PORT
+    static_cast<M5StopWatch *>(_display.get())->setPanelSleep(sleep);
+#else
+    (void)sleep;
+#endif
+}
+
+void Hal::enter_display_sleep()
+{
+    if (_display_asleep.load(std::memory_order_relaxed) || !_display) {
+        return;
+    }
+
+    // Block new clips before aborting the one that might be playing.
+    _display_asleep.store(true, std::memory_order_relaxed);
+    audio_abort();
+    setSpeakerAmpEnabled(false);
+
+    stopLvglUpdate();
+    // Wait out an in-flight flush, then keep the lock across the panel
+    // commands so LVGL cannot write a sleeping controller.
+    lvglLock();
+
+    // Do not call setBackLightBrightness(0). That turns the PMIC power LED
+    // on and would replace the level restored on wake. The NVS value stays.
+    _display->setBrightness(0);
+    display_panel_sleep(true);
+    touchpad_sleep();
+
+    lvglUnlock();
+    mclog::tagInfo(_tag, "display asleep after {} ms idle", kDisplayIdleTimeoutMs);
+}
+
+void Hal::exit_display_sleep()
+{
+    if (!_display_asleep.load(std::memory_order_relaxed) || !_display) {
+        return;
+    }
+
+    lvglLock();
+    display_panel_sleep(false);
+
+    int brightness = _bl_brightness;
+    if (brightness <= 0) {
+        brightness = 80;
+    }
+    setBackLightBrightness(brightness, false);
+    touchpad_wake();
+
+    // Sleep In does not keep GRAM. Invalidate while the refresh task is still
+    // stopped; it pushes a full frame on the next handler (that task owns
+    // the large LVGL stack).
+    if (lv_screen_active()) {
+        lv_obj_invalidate(lv_screen_active());
+    }
+
+    startLvglUpdate();
+    _display_asleep.store(false, std::memory_order_relaxed);
+    lvglUnlock();
+
+    noteUserActivity();
+    mclog::tagInfo(_tag, "display awake, brightness {}", _bl_brightness);
+}
+
+void Hal::idle_tick()
+{
+#ifdef M5EMU_PORT
+    m5emu::update();
+#endif
+    const uint32_t now = millis();
+    if (_last_user_activity_ms.load(std::memory_order_relaxed) == 0) {
+        noteUserActivity();
+    }
+
+    bool input = is_user_button_down();
+    static uint32_t last_pwr_poll_ms = 0;
+    if (now - last_pwr_poll_ms >= 80) {
+        last_pwr_poll_ms = now;
+        if (pmic_get_pwr_btn_state()) {
+            input = true;
+        }
+    }
+
+    if (_display_asleep.load(std::memory_order_relaxed)) {
+        if (input || touchpad_wake_requested()) {
+            exit_display_sleep();
+        }
+        return;
+    }
+
+    if (input) {
+        noteUserActivity();
+    }
+
+    const uint32_t last = _last_user_activity_ms.load(std::memory_order_relaxed);
+    // Let a clip that is already playing finish. Nudges do not count as
+    // activity, so the next quiet gap still enters sleep.
+    if (now - last >= kDisplayIdleTimeoutMs && !audio_is_active()) {
+        enter_display_sleep();
+    }
 }

@@ -42,6 +42,10 @@ static void decodeAppend(const MengkeClip& clip, std::vector<int16_t>& pcm16)
 
 void playSeq(std::initializer_list<const MengkeClip*> clips, const char* tag)
 {
+    if (GetHAL().isDisplayAsleep()) {
+        mclog::tagInfo("Mengke-Audio", "speak [{}] skipped: display asleep", tag ? tag : "?");
+        return;
+    }
     if (GetHAL().getSpeakerVolume() <= 0) {
         mclog::tagInfo("Mengke-Audio", "speak [{}] skipped: muted", tag ? tag : "?");
         return;

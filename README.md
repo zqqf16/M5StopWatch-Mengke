@@ -92,6 +92,16 @@ Unofficial fan firmware for the M5Stack StopWatch (ESP32-S3, 466×466 round AMOL
 
 启动器本身（Mooncake 图标页、状态栏、开机音效、充电提示）留着。官方示例里的秒表等应用没有注册进 `app_main`。
 
+## 待机
+
+无触摸、无 A/B/电源键、也没有摇一摇这类操作满 **45 秒**（`Hal::kDisplayIdleTimeoutMs`）后，固件会把亮度写成 0、让 CO5300 进入睡眠、让触摸控制器睡眠，并暂停 LVGL 刷新。喇叭功放只在真正播放时打开，播完就关掉，不会在 `audio_init` 之后一直开着。
+
+再点屏幕，或按 A、B、电源键，会恢复进入待机前的亮度。这块表没有旋转表冠，侧面两键和电源键就是唤醒按键。这是息屏，不是关机：充电和 USB 照常，双击电源键仍由 PMIC 关机。
+
+捕捉萌可、萌可变身里「好久没动就提醒」的语音，在屏幕睡着之后不会再响。
+
+After 45 seconds with no touch, button, or deliberate motion, the panel sleeps and the speaker amplifier stays off until the next sound. Touch the screen or press A, B, or the power button to wake. Idle nudge sounds stay quiet while the screen is asleep.
+
 ## 编译
 
 需要 ESP-IDF **5.5.x**。`sdkconfig.defaults` 来自 ESP-IDF 5.5.4；`platformio.ini` 里的 pioarduino 55.03.312 对应 ESP-IDF 5.5.5。`./build.sh` 会 source `~/esp/esp-idf-5.5/export.sh`，请把 IDF 装在这个路径，或先自行 `export.sh` 再改脚本。

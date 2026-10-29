@@ -139,11 +139,13 @@ bool Hal::pmic_get_pwr_btn_state()
 #ifdef M5EMU_PORT
     return m5emu::BtnPWR.isPressed();
 #endif
-    bool result = false;
-    if (_pm1) {
-        return _pm1->btnGetState(&result);
+    // btnGetState() returns an error code and writes the level through the
+    // pointer. Returning the status made the button look stuck released.
+    bool pressed = false;
+    if (_pm1 && _pm1->btnGetState(&pressed) == M5PM1_OK) {
+        return pressed;
     }
-    return result;
+    return false;
 }
 
 void Hal::setPowerLed(bool enabled)

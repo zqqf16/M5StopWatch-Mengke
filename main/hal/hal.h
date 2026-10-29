@@ -8,6 +8,7 @@
 #include <apps/common/common.h>
 #include <memory>
 #include <cstdint>
+#include <atomic>
 #include <string>
 #include <lvgl.h>
 #include <functional>
@@ -166,6 +167,23 @@ public:
     void setBackLightBrightness(int brightness, bool saveToSettings = false);
     int getBackLightBrightness(bool loadFromSettings = false);
 
+    // Soft idle: backlight off, CO5300 sleep, touch sleep, LVGL paused, speaker
+    // amp forced off. Not a PMIC shutdown, so USB and charging keep working.
+    // Wake sources are touch, A, B, and the power button (this watch has no
+    // rotary crown). Apps call noteUserActivity() for deliberate motion.
+    static constexpr uint32_t kDisplayIdleTimeoutMs = 45000;
+    void noteUserActivity()
+    {
+        _last_user_activity_ms.store(millis(), std::memory_order_relaxed);
+    }
+    bool isDisplayAsleep() const
+    {
+        return _display_asleep.load(std::memory_order_relaxed);
+    }
+    // AW8737A / PY32 speaker PA. Playback turns this on around a clip and off
+    // when the clip finishes; audio_init leaves it off.
+    void setSpeakerAmpEnabled(bool enable);
+
     // M5GFX
     LGFX_Device& getDisplay();
     LGFX_Sprite& getCanvas();
@@ -299,6 +317,10 @@ private:
     AudioSpectrumFrame _audio_spectrum;
     int _bl_brightness = 80;
     int _spk_volume    = 80;
+    std::atomic<uint32_t> _last_user_activity_ms{0};
+    std::atomic<bool> _display_asleep{false};
+    bool _spk_amp_on    = false;
+    bool _spk_amp_valid = false;
 
     void i2c_init();
     void i2c_detect();
@@ -309,8 +331,17 @@ private:
     void ioe_speaker_enable(bool enable);
     void display_init();
     void touchpad_init();
+    void touchpad_sleep();
+    void touchpad_wake();
+    bool touchpad_wake_requested();
     void lvgl_init();
+    void idle_tick();
+    void enter_display_sleep();
+    void exit_display_sleep();
     void audio_init();
+    void audio_abort();
+    bool audio_is_active();
+    bool is_user_button_down() const;
     void imu_init();
     void rtc_init();
     void button_init();
