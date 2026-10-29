@@ -51,6 +51,7 @@ static void start_charge(AppMengkeTransform::State* s, bool first, uint32_t now)
 static void add_energy(AppMengkeTransform::State* s, lv_obj_t* root, float e, uint32_t now, const char* how)
 {
     if (e <= 0) return;
+    GetHAL().noteUserActivity();
     s->energy = std::min(100.0f, s->energy + e);
     s->t_act = now;
     lv_arc_set_value(s->ring, (int)s->energy);
@@ -251,6 +252,7 @@ void AppMengkeTransform::onRunning()
         if (s->energy >= 100) start_cast(s, _root, now);
         else if (now - s->t_act > 8000 && now - s->t_hint > 8000) {
             s->t_hint = now;
+            if (GetHAL().isDisplayAsleep()) break;
             mk::play(mengke_sfx_t_hint, "transform hint");
             mk::bounce(s->core, 2);
         }

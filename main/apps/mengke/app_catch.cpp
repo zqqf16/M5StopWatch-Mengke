@@ -1,7 +1,8 @@
 // 捕捉萌可: voice-led effort search for pre-readers (no directional arrow).
 // Child shakes / spins / moves the watch (BMI270 accel+gyro magnitude) or mashes A to fill a progress ring.
 // Cute searching animation (swirling stars + peeking silhouette). Rotating encouragement voices while active;
-// silence for a few seconds -> gentle nudge. After ~3–6 s of sustained effort (randomized need), reveal:
+// silence for a few seconds -> gentle nudge, unless the screen is in display-sleep.
+// After ~3–6 s of sustained effort (randomized need), reveal:
 //   Success (~70%): star burst, "抓到啦！是XX！" + intro, update catch collection (prefer new), celebration.
 //   Miss (~30%): gentle fade / she slips away, soft "哎呀，她跑掉啦！再试一次吧！" — no punishment.
 // B = collection gallery. Hold A+B = home. Speech interrupts; volume 0 mutes.
@@ -132,6 +133,7 @@ static void open_gallery(AppMengkeCatch::State* s)
 static void add_progress(AppMengkeCatch::State* s, lv_obj_t* root, float e, uint32_t now, const char* how)
 {
     if (e <= 0 || s->phase != AppMengkeCatch::State::Search) return;
+    GetHAL().noteUserActivity();
     s->progress = std::min(s->need, s->progress + e);
     s->t_act = now;
     int pct = (int)(s->progress * 100.0f / s->need);
@@ -373,6 +375,7 @@ void AppMengkeCatch::onRunning()
         if (s->progress >= s->need) finish_effort(s, _root, now, motion > 0 ? "motion" : "button");
         else if (now - s->t_act > 4500 && now - s->t_hint > 4500) {
             s->t_hint = now;
+            if (GetHAL().isDisplayAsleep()) break;  // keep the hint timer fresh, but stay quiet
             mk::play(s->go_i % 2 ? mengke_sfx_c_hint1 : mengke_sfx_c_hint2, "catch hint");
             mk::bounce(s->peek, 2);
             mclog::tagInfo("Catch", "nudge after idle");

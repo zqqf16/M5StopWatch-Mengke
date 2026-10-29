@@ -51,6 +51,9 @@ void Hal::init()
     button_init();
     fs_init();
     wifi_init();
+
+    // Idle timeout starts once the device is actually up, not at boot zero.
+    noteUserActivity();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -75,7 +78,14 @@ std::uint32_t Hal::millis()
 void Hal::feedTheDog()
 {
     wifi_tick();
-    vTaskDelay(1);
+    idle_tick();
+    // Awake path keeps the original 1-tick yield. Asleep, back off so the
+    // main loop is not a 1 kHz spin next to a sleeping panel.
+    if (isDisplayAsleep()) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    } else {
+        vTaskDelay(1);
+    }
 }
 
 std::array<uint8_t, 6> Hal::getFactoryMac()

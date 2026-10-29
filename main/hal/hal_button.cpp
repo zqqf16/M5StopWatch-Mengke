@@ -32,6 +32,11 @@ void Hal::button_init()
     getButtonConfig(true);
 }
 
+bool Hal::is_user_button_down() const
+{
+    return gpio_get_level(USER_BUTTONA_PIN) == 0 || gpio_get_level(USER_BUTTONB_PIN) == 0;
+}
+
 void Hal::updateButtonStates()
 {
     btnA.setRawState(millis(), !gpio_get_level(USER_BUTTONA_PIN));
