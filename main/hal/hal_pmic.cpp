@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include <esp_system.h>
+#include <apps/common/audio/audio.h>
 #include <mooncake_log.h>
 #include <M5PM1.h>
 #ifdef M5EMU_PORT
@@ -195,4 +197,25 @@ bool Hal::isBatteryCharging(bool strict)
         return external_power_inserted && charging_active;
     }
     return external_power_inserted;
+}
+
+void Hal::powerOff()
+{
+#ifdef M5EMU_PORT
+    mclog::tagInfo(_tag, "m5emu: powerOff (no-op)");
+    return;
+#endif
+    mclog::tagInfo(_tag, "PMIC shutdown (same as double-click power)");
+    audio_abort();
+    setSpeakerAmpEnabled(false);
+    if (_pm1) {
+        _pm1->shutdown();
+    } else {
+        mclog::tagError(_tag, "powerOff: PMIC missing, falling back to esp_restart");
+        esp_restart();
+    }
+    // shutdown() should not return; if it does, wait for the rail to drop.
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }

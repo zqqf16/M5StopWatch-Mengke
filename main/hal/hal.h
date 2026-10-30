@@ -167,10 +167,10 @@ public:
     void setBackLightBrightness(int brightness, bool saveToSettings = false);
     int getBackLightBrightness(bool loadFromSettings = false);
 
-    // Soft idle: backlight off, CO5300 sleep, touch sleep, LVGL paused, speaker
-    // amp forced off. Not a PMIC shutdown, so USB and charging keep working.
-    // Wake sources are touch, A, B, and the power button (this watch has no
-    // rotary crown). Apps call noteUserActivity() for deliberate motion.
+    // Idle timeout uses the same PMIC shutdown as a double-click on the power
+    // button. Wake is a power-button press (cold boot). Soft display-sleep
+    // helpers remain for optional use; idle no longer enters that path.
+    // Apps call noteUserActivity() for deliberate motion.
     static constexpr uint32_t kDisplayIdleTimeoutMs = 45000;
     void noteUserActivity()
     {
@@ -180,6 +180,8 @@ public:
     {
         return _display_asleep.load(std::memory_order_relaxed);
     }
+    // Same effect as double-clicking the power button (M5PM1 shutdown).
+    void powerOff();
     // AW8737A / PY32 speaker PA. Playback turns this on around a clip and off
     // when the clip finishes; audio_init leaves it off.
     void setSpeakerAmpEnabled(bool enable);

@@ -19,11 +19,15 @@ const KeyEvent& KeyManager::update(bool updateButtonStates)
         if (!_go_home_latched) {
             _event           = KeyEvent::GoHome;
             _go_home_latched = true;
+            // Going home is deliberate input; never let idle power-off race it.
+            GetHAL().noteUserActivity();
         }
     } else if (GetHAL().btnA.wasClicked()) {
         _event = KeyEvent::GoPrevious;
+        GetHAL().noteUserActivity();
     } else if (GetHAL().btnB.wasClicked()) {
         _event = KeyEvent::GoNext;
+        GetHAL().noteUserActivity();
     } else if (GetHAL().btnA.isReleased() && GetHAL().btnB.isReleased()) {
         _go_home_latched = false;
     }
