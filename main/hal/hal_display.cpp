@@ -294,6 +294,9 @@ static bool _tp_int_ready         = false;
 static bool _tp_seen_high         = false;
 static uint32_t _tp_arm_ms        = 0;
 static uint32_t _tp_poll_ms       = 0;
+// Set after a successful deep-sleep command. While true, do not I2C-poll the
+// controller (NACKs on the shared bus can leave touch dead after wake).
+static bool _tp_deep_sleep        = false;
 
 static void IRAM_ATTR touch_int_isr(void *)
 {
@@ -346,6 +349,9 @@ void Hal::touchpad_sleep()
     _tp_int_flag = false;
     if (_cst820) {
         _cst820->sleep();
+        _tp_deep_sleep = true;
+    } else {
+        _tp_deep_sleep = false;
     }
     vTaskDelay(pdMS_TO_TICKS(20));
     _tp_int_flag  = false;
@@ -367,9 +373,28 @@ void Hal::touchpad_wake()
     if (_tp_int_ready) {
         gpio_intr_disable(cfg_pin_tp_int);
     }
-    _tp_int_flag = false;
+    _tp_int_flag   = false;
+    _tp_deep_sleep = false;
+
     // Deep sleep on the CST820 needs a reset before it reports again.
-    ioe_tp_reset();
+    // Probe after settle; retry a couple of times so LVGL does not start
+    // reading a controller that is still booting.
+    bool ok = false;
+    for (int attempt = 0; attempt < 3 && !ok; ++attempt) {
+        ioe_tp_reset();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (_cst820 && _cst820->probe()) {
+            ok = true;
+        }
+    }
+    if (!ok) {
+        mclog::tagWarn(_tag, "touchpad wake: CST820 not responding after reset");
+    }
+
+    // Drop any pressed state carried across sleep.
+    if (lvTouchpad) {
+        lv_indev_reset(lvTouchpad, nullptr);
+    }
 #endif
 }
 
@@ -396,7 +421,14 @@ bool Hal::touchpad_wake_requested()
         }
     }
 
-    // Slow poll in case Sleep was ignored or INT is not wired.
+    // While the CST820 is in deep sleep, wake only via TP_INT (or buttons
+    // handled elsewhere). I2C polling NACKs on the shared bus and can leave
+    // touch unusable after the panel comes back.
+    if (_tp_deep_sleep) {
+        return false;
+    }
+
+    // Slow poll only when sleep was skipped (no controller) or INT missing.
     if (_tp_poll_ms != 0 && now - _tp_poll_ms < 250) {
         return false;
     }
@@ -416,6 +448,10 @@ Hal::TouchPoint Hal::getTouchPoint()
         point.y   = m5emu::touch.y;
     }
 #else
+    // Skip I2C while the controller is deep-slept (see touchpad_wake_requested).
+    if (_tp_deep_sleep) {
+        return point;
+    }
     if (_cst820 && _cst820->read()) {
         point.num = _cst820->getFingerNum();
         if (point.num > 0) {
@@ -647,14 +683,13 @@ void Hal::exit_display_sleep()
     setBackLightBrightness(brightness, false);
     touchpad_wake();
 
-    // Sleep In does not keep GRAM. Invalidate while the refresh task is still
-    // stopped; it pushes a full frame on the next handler (that task owns
-    // the large LVGL stack).
+    // Sleep In does not keep GRAM. Invalidate and push one frame while we
+    // still hold the lock so wake is not a black panel until the next button.
     if (lv_screen_active()) {
         lv_obj_invalidate(lv_screen_active());
     }
-
     startLvglUpdate();
+    lv_timer_handler();
     _display_asleep.store(false, std::memory_order_relaxed);
     lvglUnlock();
 
@@ -672,30 +707,40 @@ void Hal::idle_tick()
         noteUserActivity();
     }
 
-    bool input = is_user_button_down();
-    static uint32_t last_pwr_poll_ms = 0;
-    if (now - last_pwr_poll_ms >= 80) {
-        last_pwr_poll_ms = now;
-        if (pmic_get_pwr_btn_state()) {
-            input = true;
-        }
-    }
-
+    // Soft display-sleep path kept for compatibility if something entered it.
     if (_display_asleep.load(std::memory_order_relaxed)) {
+        bool input = is_user_button_down();
+        static uint32_t last_pwr_poll_ms = 0;
+        if (now - last_pwr_poll_ms >= 80) {
+            last_pwr_poll_ms = now;
+            if (pmic_get_pwr_btn_state()) {
+                input = true;
+            }
+        }
         if (input || touchpad_wake_requested()) {
             exit_display_sleep();
         }
         return;
     }
 
+    bool input = is_user_button_down();
+    static uint32_t last_pwr_poll_ms_awake = 0;
+    if (now - last_pwr_poll_ms_awake >= 80) {
+        last_pwr_poll_ms_awake = now;
+        if (pmic_get_pwr_btn_state()) {
+            input = true;
+        }
+    }
     if (input) {
         noteUserActivity();
+        // Holding A/B (GoHome) or power must never fall through into shutdown.
+        return;
     }
 
     const uint32_t last = _last_user_activity_ms.load(std::memory_order_relaxed);
-    // Let a clip that is already playing finish. Nudges do not count as
-    // activity, so the next quiet gap still enters sleep.
+    // Same as double-clicking power: full PMIC shutdown. Wake with the power
+    // button (cold boot). Wait out an in-progress clip first.
     if (now - last >= kDisplayIdleTimeoutMs && !audio_is_active()) {
-        enter_display_sleep();
+        powerOff();
     }
 }

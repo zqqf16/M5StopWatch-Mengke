@@ -43,7 +43,17 @@ void Hal::updateButtonStates()
     btnB.setRawState(millis(), !gpio_get_level(USER_BUTTONB_PIN));
     // btnPwr.setRawState(millis(), pmic_get_pwr_btn_state());
 
+    // Any press refreshes the idle timer so A/B never lose a race with powerOff.
+    if (btnA.isPressed() || btnB.isPressed() || btnA.wasPressed() || btnB.wasPressed()) {
+        noteUserActivity();
+    }
+
     auto& config = getButtonConfig();
+    // A+B hold is GoHome. Skip a second click's vibe/tone — dual amp+motor
+    // spikes have been seen to drop the rail into a PMIC shutdown.
+    if (btnA.isPressed() && btnB.isPressed()) {
+        return;
+    }
     if (btnA.wasPressed()) {
         if (config.sfxEnabled) {
             audio::play_tone_from_midi(62 + 32, 0.02);
